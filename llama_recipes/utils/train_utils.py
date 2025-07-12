@@ -21,9 +21,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import LlamaTokenizer, AutoConfig, AutoModel
 
-import deepspeed
-from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+try:
+    import deepspeed
+    from deepspeed.accelerator import get_accelerator
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+    DEEPSPEED_AVAILABLE = True
+except ImportError:
+    DEEPSPEED_AVAILABLE = False
+    print("Warning: DeepSpeed not available, some features may be disabled")
 
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -36,6 +41,15 @@ from torch.distributed.fsdp import (
 from llama_recipes.model_checkpointing import save_model_checkpoint, save_model_and_optimizer_sharded, save_optimizer_checkpoint
 from llama_recipes.policies import fpSixteen,bfSixteen, get_llama_wrapper
 from llama_recipes.utils.memory_utils import MemoryTrace
+
+def safe_writer_add_scalar(writer, name, value, step, rank=None):
+    """Safely add scalar to writer or print if writer is None"""
+    if rank is not None and rank != 0:
+        return
+    if writer is not None:
+        writer.add_scalar(name, value, step)
+    else:
+        print(f"Metric {name} at step {step}: {value}")
 
 def set_tokenizer_params(tokenizer: LlamaTokenizer):
     tokenizer.pad_token_id = 0
@@ -163,7 +177,10 @@ def train_ppo_reward_model(model, train_dataloader,eval_dataloader, tokenizer, o
                         optimizer.zero_grad()
                         pbar.update(1)
                         if rank==0:
-                            writer.add_scalar("Loss/train", update_step_loss.detach().float(), update_step)
+                            if writer is not None:
+                                safe_writer_add_scalar(writer, "Loss/train", update_step_loss.detach().float(), update_step, rank)
+                            else:
+                                print(f"Training Loss at step {update_step}: {update_step_loss.detach().float()}")
                         update_step_loss = 0.0
                 else:
                     # regular backpropagation when fp16 is not used
@@ -174,7 +191,10 @@ def train_ppo_reward_model(model, train_dataloader,eval_dataloader, tokenizer, o
                         optimizer.zero_grad()
                         pbar.update(1)
                         if rank==0:
-                            writer.add_scalar("Loss/train", update_step_loss.detach().float(), update_step)
+                            if writer is not None:
+                                safe_writer_add_scalar(writer, "Loss/train", update_step_loss.detach().float(), update_step, rank)
+                            else:
+                                print(f"Training Loss at step {update_step}: {update_step_loss.detach().float()}")
                         update_step_loss = 0.0
                 pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
             
@@ -214,9 +234,14 @@ def train_ppo_reward_model(model, train_dataloader,eval_dataloader, tokenizer, o
             # eval_ppl, eval_epoch_loss = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer)
             eval_epoch_loss, eval_chosen_mean_scores, eval_rejected_mean_scores= evaluation_ppo_reward(model, train_config, eval_dataloader, local_rank, tokenizer)
             if rank == 0:
-                writer.add_scalar("Loss/eval", eval_epoch_loss, epoch + 1)
-                writer.add_scalar("Chosen_Mean_Scores/eval", eval_chosen_mean_scores, epoch + 1)
-                writer.add_scalar("Rejected_Mean_Scores/eval", eval_rejected_mean_scores, epoch + 1)
+                if writer is not None:
+                    safe_writer_add_scalar(writer, "Loss/eval", eval_epoch_loss, epoch + 1, rank)
+                    safe_writer_add_scalar(writer, "Chosen_Mean_Scores/eval", eval_chosen_mean_scores, epoch + 1, rank)
+                    safe_writer_add_scalar(writer, "Rejected_Mean_Scores/eval", eval_rejected_mean_scores, epoch + 1, rank)
+                else:
+                    print(f"Evaluation Loss at epoch {epoch + 1}: {eval_epoch_loss}")
+                    print(f"Chosen Mean Scores at epoch {epoch + 1}: {eval_chosen_mean_scores}")
+                    print(f"Rejected Mean Scores at epoch {epoch + 1}: {eval_rejected_mean_scores}")
             checkpoint_start_time = time.perf_counter()
             if train_config.save_model and eval_epoch_loss < best_val_loss:
                 if train_config.enable_fsdp:
@@ -235,11 +260,11 @@ def train_ppo_reward_model(model, train_dataloader,eval_dataloader, tokenizer, o
                         print(f"PEFT modules are saved in {train_config.output_dir} directory")
 
                 else:
-                    if not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
+                    if not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
                         save_model_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
-                    elif not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
+                    elif not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
                         print(" Saving the FSDP model checkpoints using SHARDED_STATE_DICT")
                         print("=====================================================")
 
@@ -287,11 +312,11 @@ def train_ppo_reward_model(model, train_dataloader,eval_dataloader, tokenizer, o
                         print(f"PEFT modules are saved in {train_config.output_dir} directory")
 
                 else:
-                    if not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
+                    if not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
                         save_model_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
-                    elif not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
+                    elif not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
                         print(" Saving the FSDP model checkpoints using SHARDED_STATE_DICT")
                         print("=====================================================")
 
@@ -376,6 +401,9 @@ def train_reward_model(model, train_dataloader,eval_dataloader, tokenizer, optim
         world_size = int(os.environ["WORLD_SIZE"])
     autocast = torch.cuda.amp.autocast if train_config.use_fp16 else nullcontext
 
+    # Initialize writer as None - will be handled by safe_writer_add_scalar
+    writer = None
+
     train_prep = []
     train_loss = []
     val_prep = []
@@ -415,7 +443,6 @@ def train_reward_model(model, train_dataloader,eval_dataloader, tokenizer, optim
                         scaler.update()
                         optimizer.zero_grad()
                         pbar.update(1)
-                        update_step_loss = 0.0
                 else:
                     # regular backpropagation when fp16 is not used
                     loss.backward()
@@ -424,7 +451,6 @@ def train_reward_model(model, train_dataloader,eval_dataloader, tokenizer, optim
                         optimizer.step()
                         optimizer.zero_grad()
                         pbar.update(1)
-                        update_step_loss = 0.0
                 pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
             
             pbar.close()
@@ -462,16 +488,21 @@ def train_reward_model(model, train_dataloader,eval_dataloader, tokenizer, optim
         if train_config.run_validation:
             eval_ppl, eval_epoch_loss = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer)
             if rank == 0 or rank == None:
-                writer.add_scalar("Loss/eval", eval_epoch_loss, epoch + 1)
-                writer.add_scalar("Perplexity/eval", eval_ppl, epoch + 1)
+                safe_writer_add_scalar(writer, "Loss/eval", eval_epoch_loss, epoch + 1, rank)
+                safe_writer_add_scalar(writer, "Perplexity/eval", eval_ppl, epoch + 1, rank)
             checkpoint_start_time = time.perf_counter()
             if train_config.save_model and eval_epoch_loss < best_val_loss:
                 if train_config.enable_fsdp == False:
                     if train_config.only_cls_for_rmce:
+                        # UAR模式：保存分类头权重用于UAR推理
                         score_weight_state_dict = {name: param for name, param in model.state_dict().items() if name == 'score.weight'}
                         if os.path.exists(train_config.output_dir) is False:
                             os.makedirs(train_config.output_dir)
                         torch.save(score_weight_state_dict, os.path.join(train_config.output_dir, 'filtered_model.pth'))
+                        
+                        # 同时保存完整模型以确保兼容性
+                        model.save_pretrained(train_config.output_dir)
+                        print(f"UAR模式：已保存分类头权重 (filtered_model.pth) 和完整模型")
                     else:
                         model.save_pretrained(train_config.output_dir)
 
@@ -491,12 +522,12 @@ def train_reward_model(model, train_dataloader,eval_dataloader, tokenizer, optim
                         print(f"PEFT modules are saved in {train_config.output_dir} directory")
 
                 else:
-                    if not train_config.use_peft and train_config.enable_fsdp and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
+                    if not train_config.use_peft and train_config.enable_fsdp and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
 
                         save_model_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
-                    elif not train_config.use_peft and train_config.enable_fsdp and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
+                    elif not train_config.use_peft and train_config.enable_fsdp and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
                         print(" Saving the FSDP model checkpoints using SHARDED_STATE_DICT")
                         print("=====================================================")
 
@@ -543,11 +574,11 @@ def train_reward_model(model, train_dataloader,eval_dataloader, tokenizer, optim
                         print(f"PEFT modules are saved in {train_config.output_dir} directory")
 
                 else:
-                    if not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
+                    if not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
                         save_model_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
-                    elif not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
+                    elif not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
                         print(" Saving the FSDP model checkpoints using SHARDED_STATE_DICT")
                         print("=====================================================")
 
@@ -657,7 +688,7 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         optimizer.zero_grad()
                         pbar.update(1)
                         if rank == 0 or rank == None:
-                            writer.add_scalar("Loss/train", update_step_loss.detach().float(), update_step)
+                            safe_writer_add_scalar(writer, "Loss/train", update_step_loss.detach().float(), update_step, rank)
                         update_step_loss = 0.0
                 else:
                     # regular backpropagation when fp16 is not used
@@ -668,7 +699,7 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         optimizer.zero_grad()
                         pbar.update(1)
                         if rank == 0:
-                            writer.add_scalar("Loss/train", update_step_loss.detach().float(), update_step)
+                            safe_writer_add_scalar(writer, "Loss/train", update_step_loss.detach().float(), update_step, rank)
                         update_step_loss = 0.0
                 pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
             
@@ -707,8 +738,8 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
         if train_config.run_validation:
             eval_ppl, eval_epoch_loss = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer)
             if rank == 0 or rank == None:
-                writer.add_scalar("Loss/eval", eval_epoch_loss, epoch + 1)
-                writer.add_scalar("Perplexity/eval", eval_ppl, epoch + 1)
+                safe_writer_add_scalar(writer, "Loss/eval", eval_epoch_loss, epoch + 1, rank)
+                safe_writer_add_scalar(writer, "Perplexity/eval", eval_ppl, epoch + 1, rank)
             checkpoint_start_time = time.perf_counter()
             if train_config.save_model and eval_epoch_loss < best_val_loss:
                 if train_config.enable_fsdp:
@@ -727,12 +758,12 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         print(f"PEFT modules are saved in {train_config.output_dir} directory")
 
                 else:
-                    if not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
+                    if not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
 
                         save_model_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
-                    elif not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
+                    elif not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
                         print(" Saving the FSDP model checkpoints using SHARDED_STATE_DICT")
                         print("=====================================================")
 
@@ -742,7 +773,7 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                             print(" Saving the FSDP model checkpoints and optimizer using SHARDED_STATE_DICT")
                             print("=====================================================")
 
-                    if not train_config.use_peft and  train_config.save_optimizer:
+                    if not train_config.use_peft and train_config.save_optimizer:
                         save_optimizer_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
@@ -779,11 +810,11 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
                         print(f"PEFT modules are saved in {train_config.output_dir} directory")
 
                 else:
-                    if not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
+                    if not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.FULL_STATE_DICT:
                         save_model_checkpoint(
                             model, optimizer, rank, train_config, epoch=epoch
                         )
-                    elif not train_config.use_peft and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
+                    elif not train_config.use_peft and fsdp_config is not None and fsdp_config.checkpoint_type == StateDictType.SHARDED_STATE_DICT:
                         print(" Saving the FSDP model checkpoints using SHARDED_STATE_DICT")
                         print("=====================================================")
 

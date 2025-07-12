@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class train_config:
-    model_name: str="PATH/to/LLAMA/7B"
+    model_name: str="Qwen/Qwen3-4B" # 默认使用Qwen模型，可通过参数覆盖
     enable_fsdp: bool=False
     low_cpu_fsdp: bool=False
     run_validation: bool=True

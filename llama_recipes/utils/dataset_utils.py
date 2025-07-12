@@ -49,6 +49,7 @@ DATASET_PREPROC = {
     "knowledge_aware_cls_ce": partial(get_reward_dataset),
     "self_aware_cls_ce_llama2_7b_chat": partial(get_reward_dataset),
     "self_aware_cls_ce_llama2_13b_chat": partial(get_reward_dataset),
+    "self_aware_cls_ce_qwen3_4b": partial(get_reward_dataset),
     "intent_aware_cls_ce": partial(get_reward_dataset),
 }
 

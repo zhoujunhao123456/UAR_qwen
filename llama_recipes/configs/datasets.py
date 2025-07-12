@@ -42,3 +42,11 @@ class intent_aware_cls_ce:
     test_split: str = "val"
     train_data_path: str = "training_data/intent_aware_cls_ce_train.json"
     valid_data_path: str = "training_data/intent_aware_cls_ce_valid.json"
+
+@dataclass
+class self_aware_cls_ce_qwen3_4b:
+    dataset: str = "self_aware_cls_ce_qwen3_4b"
+    train_split: str = "train"
+    test_split: str = "val"
+    train_data_path: str = "training_data/self_aware_cls_ce_qwen3_4b_train.json"
+    valid_data_path: str = "training_data/self_aware_cls_ce_qwen3_4b_valid.json"
